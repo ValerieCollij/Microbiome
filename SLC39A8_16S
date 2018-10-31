@@ -1,0 +1,200 @@
+Influence of SLC39A8 missense variant on gut microbiome composition
+
+Author of code: Arnau Vich Vila
+
+Year: 2018
+
+Aim: Analysing the influence of the missense variant SLC39A8 on alpha diversity and beta diversity
+
+setwd("")
+library(vegan)
+library(phyloseq)
+library(DESeq2)
+library (ggplot2)
+library(reshape2)
+
+#import greengenes taxonomic tree for weighted methods
+my_tree=read_tree_greengenes("./97_otus.tree")
+#import phenotypes
+map = read.table("pheno.txt", sep ="\t", row.names = 1, header = T)
+#import otu table (sample names in a row, OTUs / taxa in columns)
+otus = read.table("OTU.txt", sep ="\t", row.names = 1, header = T, check.names = F)
+otus2=otus
+#import otu-taxa match
+my_tax=read.table("otu_taxonomy.txt", sep="\t", header = T, row.names = 1)
+tax=as.matrix(my_tax)
+
+#Subset (if needed) different phenotypes based on map file
+#mapCD=subset(map,map$ZICOdiagnosis=="HC")
+#mapCD=subset(map,map$ZICOdiagnosis=="CD")
+#mapCD2=subset(mapCD,mapCD$BMI<=25 )
+#mapCD=mapCD2
+otus2=otus[rownames(mapCD),]
+otus2=otus[rownames(map),]
+
+my_otus=t(otus2)
+
+#Create phyloseq object
+phy_tax=tax_table(tax)
+#map_f=sample_data(map)
+map_f=sample_data(map)
+phy_otu=otu_table(my_otus, taxa_are_rows = T)
+physeq_obj = phyloseq(phy_otu, phy_tax)
+physeq_obj_tree=merge_phyloseq(physeq_obj,my_tree)
+physeq_obj_tree_map=merge_phyloseq(physeq_obj_tree,map_f)
+
+#Data transformation
+total = median(sample_sums(physeq_obj_tree))
+standf = function(x, t=total) round(t * (x / sum(x)))
+transform_phy=transform_sample_counts(physeq_obj_tree_map, standf)
+
+#Calculate Jensen-Shannon Divergence and PCoA
+
+jsd.dist = phyloseq::distance(transform_phy, "jsd", parallel=TRUE)
+ent.PCoA = ordinate(transform_phy, "PCoA", jsd.dist)
+jsd_plot=plot_ordination(transform_phy, ent.PCoA,color="SNPSLC39A8")
+jsd_plot = jsd_plot + theme_bw()
+adonis(jsd.dist ~ Age+Gender+ReadDepthQIIME+SNPSLC39A8, data = map)
+
+#Calculate weighted Unifrac
+
+#wUF.dist = UniFrac(transform_phy, weighted=TRUE, normalized=TRUE)
+WU.dist <- phyloseq::distance(transform_phy, "unifrac", weighted=TRUE)
+#J.dist=vegdist(OTU.clean, distance="jaccard")
+WU.PCoA = ordinate(transform_phy, "PCoA", WU.dist)
+WU_plot=plot_ordination(transform_phy, WU.PCoA,color="SNPSLC39A8")
+WU_plot = WU_plot + theme_bw()
+adonis(WU.dist ~ Age+Gender+ReadDepthQIIME+SNPSLC39A8, data = map)
+
+#Calculate Unifrac
+
+#UF.dist = UniFrac(transform_phy, weighted=FALSE, normalized=TRUE)
+U.dist <- phyloseq::distance(transform_phy, "unifrac", parallel=TRUE)
+U.PCoA = ordinate(transform_phy, "PCoA", U.dist)
+U_plot=plot_ordination(transform_phy, U.PCoA,color="SNPSLC39A8")
+U_plot = U_plot + theme_bw()
+adonis(U.dist ~ Age+Gender+ReadDepthQIIME+SNPSLC39A8, data = map)
+
+
+#Calculate Jaccard
+J.dist <- phyloseq::distance(transform_phy, "jaccard", parallel=TRUE)
+#J.dist=vegdist(OTU.clean, distance="jaccard")
+J.PCoA = ordinate(transform_phy, "PCoA", J.dist)
+J_plot=plot_ordination(transform_phy, J.PCoA,color="SNPSLC39A8")
+J_plot = J_plot + theme_bw()
+adonis(J.dist ~ Age+Gender+ReadDepthQIIME+SNPSLC39A8, data = map)
+
+#Calculate Bray-Curtis
+BC.dist <- phyloseq::distance(transform_phy, "bray", parallel=TRUE)
+#BC.dist=vegdist(OTU.clean, distance="bray")
+BC.PCoA = ordinate(transform_phy, "PCoA", BC.dist)
+BC_plot=plot_ordination(transform_phy, BC.PCoA,color="SNPSLC39A8")
+BC_plot = BC_plot + theme_bw()
+adonis(BC.dist ~ Age+Gender+ReadDepthQIIME+SNPSLC39A8, data = map)
+
+#Correct alpha diversity: https://github.com/alexa-kur/miQTL_cookbook/blob/master/software/step5.1_create_alpha_diveristy.R
+shannon = diversity(otus2,index = "shannon")
+simpson = diversity(otus2,index = "simpson")
+invsimpson = diversity(otus2,index = "invsimpson")
+chao=t(estimateR(otus2))[,1:2]
+div2= data.frame(row.names = rownames(otus2),shannon = shannon, simpson = simpson,invsimpson = invsimpson)
+all_div=merge(div2,chao, by="row.names")
+rownames(all_div)=all_div$Row.names
+all_div$Row.names=NULL
+all_div$log_obs=log(all_div$S.obs)
+all_div$log_chao=log(all_div$S.chao1)
+#Factors for correction
+
+#for all
+phenos=map[,c("Age","Gender","ReadDepthQIIME")]
+#for IBD
+phenos=mapCD[,c("YearsHavingIBD","Age","Gender","ReadDepthQIIME")]
+
+corrected_data = apply(all_div,2,function(x){
+  x.subset = x[!is.na(x)]
+  phenos.subset = phenos[!is.na(x),,drop = FALSE]
+  phenos.subset.matrix = data.matrix(phenos.subset)
+  if(ncol(phenos.subset)==ncol(phenos.subset.matrix)){
+    phenos.subset = phenos.subset[,apply(phenos.subset.matrix,2,sd) !=0,drop = FALSE]
+  }
+
+  x.resid = resid(lm(x.subset ~ .,data = phenos.subset))
+  x[!is.na(x)] = x.resid+100
+  x[is.na(x)] = 0
+  return(x)
+})
+
+#Plot corrected data
+corrected_data = as.data.frame(corrected_data)
+corrected_data2 = data.frame(rownames(corrected_data),corrected_data)
+corrected_data2$rownames.corrected_data.=NULL
+phenos_plot=map[,c("Age","Gender","SNPSLC39A8", "ZIC0diagnosis")]
+corrected_data3=merge(phenos_plot,corrected_data2, by="row.names")
+corrected_data3$Age=NULL
+corrected_data3$Gender=NULL
+corrected_data3$S.obs=NULL
+corrected_data3$S.chao1=NULL
+melt_corrected=melt(corrected_data3,id =c("Row.names","SNPSLC39A8"))
+ggplot(melt_corrected, aes(as.factor(SNPSLC39A8), value)) + geom_boxplot() + theme_bw() + facet_wrap (~variable, scales="free")
+
+ #test
+wilcox.test(corrected_data3$shannon~as.factor(corrected_data3$SNPSLC39A8))
+wilcox.test(corrected_data3$simpson~as.factor(corrected_data3$SNPSLC39A8))
+wilcox.test(corrected_data3$invsimpson~as.factor(corrected_data3$SNPSLC39A8))
+wilcox.test(corrected_data3$log_obs~as.factor(corrected_data3$SNPSLC39A8))
+wilcox.test(corrected_data3$log_chao~as.factor(corrected_data3$SNPSLC39A8))
+
+#Plot uncorrected data
+all_div2=merge(phenos_plot,all_div, by="row.names")
+all_div2$Age=NULL
+all_div2$Gender=NULL
+all_div2$log_obs=NULL
+all_div2$log_chao=NULL
+melt_all=melt(all_div2,id =c("Row.names","SNPSLC39A8"))
+ggplot(melt_all, aes(as.factor(SNPSLC39A8), value)) + geom_boxplot() + theme_bw() + facet_wrap (~variable, scales="free")
+
+#Test
+wilcox.test(all_div2$shannon~as.factor(all_div2$SNPSLC39A8))
+wilcox.test(all_div2$simpson~as.factor(all_div2$SNPSLC39A8))
+wilcox.test(all_div2$invsimpson~as.factor(all_div2$SNPSLC39A8))
+wilcox.test(all_div2$S.obs~as.factor(all_div2$SNPSLC39A8))
+wilcox.test(all_div2$S.chao1~as.factor(all_div2$SNPSLC39A8))
+
+#Plot all alpha diversity per cohort
+tax=as.matrix(my_tax)
+shannon = diversity(otus2,index = "shannon")
+simpson = diversity(otus2,index = "simpson")
+invsimpson = diversity(otus2,index = "invsimpson")
+chao=t(estimateR(otus2))[,1:2]
+div2= data.frame(row.names = rownames(otus2),shannon = shannon, simpson = simpson,invsimpson = invsimpson)
+all_div=merge(div2,chao, by="row.names")
+rownames(all_div)=all_div$Row.names
+all_div$Row.names=NULL
+all_div$log_obs=log(all_div$S.obs)
+all_div$log_chao=log(all_div$S.chao1)
+phenos_plot=map[,c("Age","Gender","SNPSLC39A8","ZICOdiagnosis")]
+all_div2=merge(phenos_plot,all_div, by="row.names")
+all_div2$Age=NULL
+all_div2$Gender=NULL
+all_div2$log_obs=NULL
+all_div2$log_chao=NULL
+melt_all=melt(all_div2,id =c("Row.names","SNPSLC39A8","ZICOdiagnosis"))
+melty=subset(melt_all,melt_all$ZICOdiagnosis!="IBDU")
+
+#ggplot(melty, aes(ZICOdiagnosis, value, fill=as.factor(SNPSLC39A8))) + geom_boxplot(outlier.alpha = 0, position=position_dodge(1)) +  geom_jitter(shape=16, alpha=0.1)+ theme_bw() + facet_wrap (~variable, scales="free") + guides(fill=FALSE)
+ggplot(melt_all, aes(as.factor(SNPSLC39A8), value, fill=as.factor(SNPSLC39A8))) + geom_boxplot(outlier.alpha = 0, position=position_dodge(1)) +  geom_point(aes(color=as.factor(SNPSLC39A8)),alpha = 0.1, position = position_jitterdodge()) + facet_wrap (~variable, scales="free")  + theme_bw() + guides(fill=FALSE)
+
+# Plot years IBD per disease cohort
+phenos_plot=map[,c("Age","Gender","SNPSLC39A8","ZICOdiagnosis","YearsHavingIBD")]
+ phenos_plot$ID=rownames(phenos_plot)
+ phenos_plot$Age=NULL
+ phenos_plot$Gender=NULL
+ melty=melt(phenos_plot,id =c("ID","SNPSLC39A8","ZICOdiagnosis"))
+# View(melty)
+ melty2=subset(melty,melty$ZICOdiagnosis!="IBDU")
+ melty2=subset(melty2,melty2$ZICOdiagnosis!="HC")
+ ggplot(melty2, aes(ZICOdiagnosis, value, fill=as.factor(SNPSLC39A8))) + geom_boxplot(outlier.alpha = 0, position=position_dodge(0.8), alpha=0.3) + geom_point(aes(color=as.factor(SNPSLC39A8)),alpha = 0.3, position = position_jitterdodge()) + theme_bw() + guides(fill=FALSE)
+
+
+
+
